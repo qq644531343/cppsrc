@@ -6,7 +6,12 @@ int main()
 	printf("Hello World!\n");
 	   
 	system("tasklist > 1.txt");
+	
+	//system("explorer.exe C:\\");
 
-	getchar();
+	system("\"C:\\Program Files\\Internet Explorer\\iexplore.exe\" baidu.com");
+
+
+	//getchar();
 	return 0;
 }
