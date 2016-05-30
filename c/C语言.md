@@ -30,6 +30,8 @@ system函数可以执行大多数能在控制台中打开的程序。
 
 ####windows常用函数
 ```
+#include<stdio.h>
+#include<stdlib.h>
 #include <windows.h>
 
 int main() 
@@ -51,6 +53,21 @@ int main()
 	return 0;
 }
 
+//工程属性，设置编译结构为dll
+//通过_declspec(dllexport)可声明函数为动态调用
+_declspec(dllexport)  void go1123()
+{
+	while (1)
+	{
+		MessageBoxA(0, "文本", "标题", 1);
+		//20代表桌面, 3代表马上生效
+		SystemParametersInfoA(20, 0, "C:\\Users\\yincheng01\\Pictures\\2.jpg", 3);
+		//调用系统播放器播放mp3
+		system("C:\\Users\\yincheng01\\Pictures\\123.mp3");
+		Sleep(12000);	
+	}
+}
+
 ```
 
 ####转义字符
@@ -59,7 +76,7 @@ int main()
 ------- | ------- | -------
 \'	| 单引号 | 039
 \"	| 双引号 | 034
-\\ |	反斜杠 | 092
+\\\ |	反斜杠 | 092
 \0	| 空字符 | 000
 \a |	响铃 | 007
 \b |	后退 | 008
@@ -68,11 +85,15 @@ int main()
 \r	 | 回车 | 013
 \t	 | 水平制表符 | 009
 \v	| 垂直制表符 | 011
-\xnnn	| 表示十六进制数(nnn)  | 
+\xnn	| 表示十六进制数(nn)  | 
 \ddd | 三位八进制
 
 ####输入输出
 ```
+
+//关闭安全检查 vs2013  springf
+#define _CRT_SECURE_NO_WARNINGS
+
 void testIO()
 {
     char str1[10];
@@ -89,6 +110,13 @@ void testIO()
     char str[15];
     gets(str);
     puts(str);
+    
+    char string[50];
+    sprintf(string, "%s", "calc");
+    //sprintf(str, "%s%s", "s1", "s 2");
+    //参数1:用语存储产生的字符串
+    //参数2：格式化串
+    //参数3～n， 待拼装的值
     
 }
 ```
