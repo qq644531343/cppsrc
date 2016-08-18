@@ -1,0 +1,881 @@
+//
+//  FreshTabViewController.m
+//  ShoppingStreets
+//
+//  Created by libo on 16/7/20.
+//  Copyright © 2016年 淘街. All rights reserved.
+//
+
+#import "FreshTabViewController.h"
+
+const NSString *freshSyncLock = @"syncLock";
+
+
+@implementation FreshTabViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    
+    //界面的初始化设置
+    [self configInit];
+    
+    //加载数据
+    [self showHudText:@""];
+    [self reloadTagData];
+
+}
+
+# pragma mark - UI Setup
+
+- (void)configInit {
+    
+    //初始化设置
+    self.automaticallyAdjustsScrollViewInsets = NO;
+    self.extendedLayoutIncludesOpaqueBars = YES;
+    self.topInset = 64;
+    self.lastAlpha = 1;
+    tabBarShow = YES;
+    
+    self.tableView = [[ASTableView alloc] initWithFrame:[UIScreen mainScreen].bounds style:UITableViewStylePlain asyncDataFetching:YES];
+    _tableView.asyncDataSource = self;
+    _tableView.asyncDelegate = self;
+    _tableView.separatorStyle = UITableViewCellSeparatorStyleSingleLine;
+    _tableView.tableFooterView = [UIView new];
+    [self.view addSubview:self.tableView];
+    
+    UIEdgeInsets inset = self.tableView.contentInset;
+    inset.bottom = 49;
+    self.tableView.contentInset = inset;
+    
+    __weak typeof(self) weakSelf = self;
+    [self.tableView addUpdateHeaderWithTarget:self action:@selector(tableviewPullRefresh) dateKey:@"SHS_POI_MAINPAGE"];
+    [self.tableView addInfiniteScrollingWithActionHandler:^{
+        [weakSelf tableviewLoadmore];
+    }];
+    self.tableView.updateHeader.upInset = self.topInset;
+    
+    self.tableView.backgroundColor = FMColorWithRGB0X(0xF2F2F2);
+    self.tableView.separatorColor = FMColorWithRGB0X(0xe9e9e9);
+    
+    [self.view addSubview:self.pubButton];
+
+    //导航条设置
+    [self configNavigation];
+    
+    //配置headview
+    [self setupTableHeaderView];
+    
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(mallShouldChange) name:kEnvMallSelectChangeNotification object:nil];
+
+}
+
+- (void)configNavigation {
+    
+     self.navigationItem.titleView = self.searchButton;
+    [self configTopBar:self.poiInfo.name];
+}
+
+/**
+ *  设置 POI 顶部图片，作为 TableView 的 subview
+ */
+- (void)setupTableHeaderView {
+    self.bannerHeight = 160;
+    self.headerView = [[MiaoHeaderView alloc] initWithFrame:CGRectMake(0, -self.topInset, self.view.bounds.size.width, self.bannerHeight)];
+    self.headerView.topInset = - self.topInset;
+    [self.tableView insertSubview:self.headerView atIndex:1];
+    self.tableView.tableHeaderView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, self.bannerHeight-64)];
+    self.tableView.tableHeaderView.userInteractionEnabled = NO;
+    [self.headerView setScrollY:self.tableView.contentOffset.y];
+}
+
+- (void)tableviewRefresh
+{
+    [self reloadTagData];
+}
+
+- (void)reloadSection {
+    __weak typeof(self) weakSelf = self;
+    @synchronized(timeLineLock) {
+        if([self.tableView numberOfSections] > 0) {
+            [self.tableView beginUpdates];
+            [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:0] withRowAnimation:UITableViewRowAnimationNone];
+            [self.tableView endUpdatesAnimated:NO completion:^(BOOL completed) {
+                SHSPoiTimeLineTagStatus *status = weakSelf.timeLineData[weakSelf.selectedTag];
+                weakSelf.tableView.showsInfiniteScrolling = status.showInfiniteScrolling;
+            }];
+        }
+    }
+}
+
+# pragma mark - TableView DataSource & Delegate
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    if (self.timelineTags.count == 0) {
+        return 0;
+    }
+    return 1;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    
+    SHSPoiTimeLineTagStatus *status = self.timeLineData[self.selectedTag];
+    if (status.showEmpty) {
+        return (status.isRefreshing ? 1 : 0) + 1 + 1;
+    }
+    return status.data.count + (status.isRefreshing ? 1 : 0) + 1;
+}
+
+- (ASCellNode *)tableView:(ASTableView *)tableView nodeForRowAtIndexPath:(NSIndexPath *)indexPath {
+    
+    ASCellNode *node;
+    SHSPoiTimeLineTagStatus *status = self.timeLineData[self.selectedTag];
+    NSInteger total = [self tableView:tableView numberOfRowsInSection:indexPath.section];
+    if (total-1 == indexPath.row) {
+        node = [[SHSNTimeLineHackCell alloc] initWithHeight: self.tableView.height - (status.showEmpty ? 340 : 0) - status.data.count * 200 - 49 - 64];
+    }else if (status.showEmpty) {
+        if (status.isRefreshing && indexPath.row == 0) {
+            node = [SHSNTimeLineRefreshCell new];
+        }else{
+            node = [SHSNTimeLineEmptyCell new];
+            [node setNeedsDisplay];
+        }
+    }else{
+        if (status.isRefreshing && indexPath.row == 0) {
+            node = [SHSNTimeLineRefreshCell new];
+        }else {
+            SHSFreshCardModel *model = [status dataForIndexPath:indexPath];
+            if (indexPath.row == 0) {
+                model.hideTopMargin = YES;
+            }
+            node = [[SHSNTimeLineCardCell alloc] initWithTimeLineItem: model delegate:self];
+            if (status.sendStatus && indexPath.row == 0) {
+                status.sendStatus = NO;
+                [(SHSNTimeLineCardCell*)node showFocusView];
+                [(SHSNTimeLineCardCell*)node setMallId:self.mallId];
+            }
+        }
+    }
+    return node;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
+    return 51;
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
+    if (self.timelineTags.count > 0) {
+        if (self.header.tags != self.timelineTags) {
+            SHSNTimeLineHeaderView *headerView = [[SHSNTimeLineHeaderView alloc] initWithTimeLineTags:self.timelineTags selectedTag:self.selectedTag];
+            headerView.frame = CGRectMake(0, 0, [UIScreen mainScreen].bounds.size.width, 41);
+            DoveObserveSender(DoveMallPoiModule, self, headerView);
+            self.header = headerView;
+            self.header.backgroundColor = [UIColor colorWithRGB:0xe5e5e5];
+        }
+        return self.header.view;
+    }
+    return nil;
+
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
+    return 0;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+   
+}
+
+- (void)scrollViewWillBeginDragging:(UIScrollView *)scrollView
+{
+    lastOffset = scrollView.contentOffset.y;
+}
+
+- (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView{
+    [self recoredFreshCardPreviewCount];
+    [self tabBarShouldShow:YES];
+}
+
+- (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate{
+    if (!decelerate) {
+        [self recoredFreshCardPreviewCount];
+    }
+}
+
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @synchronized(freshSyncLock) {
+            if (self.isFont) {
+                [self updateNavigationBarStyle];
+            }
+        }
+    });
+    
+    [self.headerView setScrollY:scrollView.contentOffset.y];
+    
+    if (scrollView.contentOffset.y - lastOffset > 100) {
+        [self tabBarShouldShow:NO];
+    }else if(lastOffset - scrollView.contentOffset.y > 80) {
+        [self tabBarShouldShow:YES];
+    }
+
+    if (self.tableViewOffsetWhenTopCellAtTop <= 0) {
+        return;
+    }
+    if (scrollView.contentOffset.y > self.tableViewOffsetWhenTopCellAtBottom) {
+        [self utRecordUserWatchingTimeLineModule];
+    }
+    
+}
+
+- (void)tabBarShouldShow:(BOOL)show {
+    
+//    if (show == tabBarShow || self.tableView.infiniteScrollingView.state >= SVInfiniteScrollingStateTriggered || self.timeLineData.count == 0) {
+//        return;
+//    }
+//    
+//    [UIView animateWithDuration:0.25 animations:^{
+//        if (show) {
+//            self.pubButton.alpha = self.tabBarController.tabBar.alpha = 1.0;
+//        }else {
+//            self.pubButton.alpha = self.tabBarController.tabBar.alpha = 0.0;
+//        }
+//    }];
+//    tabBarShow = show;
+}
+
+#pragma mark - 用户浏览量统计
+
+-(void)recoredFreshCardPreviewCount{
+    NSArray *indexPathVisable = [[self tableView] indexPathsForVisibleRows];
+    for (NSUInteger i = 0; i<indexPathVisable.count; i++) {
+        ASCellNode *node = [[self tableView] nodeForRowAtIndexPath:indexPathVisable[i]];
+        if (node && [node isKindOfClass:[SHSNTimeLineCardCell class]]) {
+            SHSFreshCardModel *item = ((SHSNTimeLineCardCell *)node).item;
+            FreshViewCountModel *model = [[FreshViewCountModel alloc] init];
+            model.feedId = item.cardId;
+            model.ownerId = item.userDO.tbUserId;
+            [SHSFreshUtil addWatchedFreshCardWithCountModel:model];
+        }
+    }
+}
+
+-(void)utRecordUserWatchingTimeLineModule{
+    SHSNMallPoiViewController *parentVC = (SHSNMallPoiViewController *)self;
+    if (parentVC && parentVC.hasUserScrollToTimeLineModule == NO) {
+        parentVC.hasUserScrollToTimeLineModule = YES;
+        [UTHelper shsCtrlClicked:SHS_UT_TIMELINE_POI_SHOW args:[NSDictionary dictionaryWithObjectsAndKeys:self.mallId,@"mallId", nil]];
+    }
+}
+
+- (CGFloat)tableViewOffsetWhenTopCellAtTop {
+    UITableViewCell *cell;
+    UIView *superView = self.topCell.view;
+    while (superView) {
+        if ([superView isKindOfClass:[UITableViewCell class]]) {
+            cell = (UITableViewCell *)superView;
+            break;
+        }
+        superView = superView.superview;
+    }
+    return cell.frame.origin.y;
+}
+
+- (CGFloat)tableViewOffsetWhenTopCellAtBottom {
+    CGFloat height = self.tableViewOffsetWhenTopCellAtTop - self.tableView.height + 64 + 49;
+    return  height;
+}
+
+
+#pragma mark - Data
+
+- (void)mallShouldChange {
+    
+    [self clearDataAndView];
+    
+    [self showHudText:@""];
+    [self reloadTagData];
+}
+
+- (void)reloadTagData {
+    
+    self.mallId = [SHSMallListService getSelectedMall];
+    
+    if (self.mallId.length == 0) {
+        [self showHudTextOnly:@"信息获取失败，请重新切换Mall" DismissDelay:2];
+        return;
+    }
+    
+//    [self showLoadingFrame:self.view.bounds];
+    [FreshTabControl requestFreshTags:self.mallId finish:^(NSArray *tags, SHSMallPoiInfoModel *poiInfo, NSString *oblineCount, NSArray *userList, BOOL success, NSString *msg) {
+        
+//        [self dismissLoading];
+        [self.tableView updateHeaderEndRefreshing];
+        [self.tableView.infiniteScrollingView stopAnimating];
+        [self hiddenHud];
+        [self configTopBar:self.poiInfo.name];
+        
+        if (success) {
+            self.poiInfo = poiInfo;
+            self.gaoDeMallId = self.poiInfo.attributes.gdPoiId;
+            self.outMapTableId = self.poiInfo.attributes.outdoor_tableId;
+            [self.headerView configureData:self.poiInfo count:oblineCount userList:userList];
+            [self configureData:tags];
+            [self initRefresh];
+        }else {
+            self.timelineTags = nil;
+            self.timeLineData = nil;
+            self.poiInfo = nil;
+            [self showHudTextOnly:msg DismissDelay:2];
+            [self.headerView configureData:nil count:0 userList:nil];
+        }
+        
+        [self.tableView reloadData];
+    
+    }];
+    
+}
+
+- (void)configureData:(NSArray *)data {
+    
+    NSArray *remoteTags = data;
+
+    self.timelineTags = [remoteTags filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(id  _Nonnull evaluatedObject, NSDictionary<NSString *,id> * _Nullable bindings) {
+        if ([evaluatedObject isKindOfClass:[SHSTimeLineTag class]]) {
+            return ((SHSTimeLineTag *)evaluatedObject).isShow;
+        }
+        return NO;
+    }]];
+    self.timeLineService = [[SHSFreshTimeLineService alloc] initWithMallId:self.mallId];
+    for (SHSTimeLineTag *tag in self.timelineTags) {
+        SHSPoiTimeLineTagStatus *status = [SHSPoiTimeLineTagStatus new];
+        status.tag = tag;
+        self.timeLineData[tag] = status;
+    }
+    
+    DoveObserve(DoveFreshPublishAPI, self);
+    DoveObserve(DoveFresh, self);
+    
+//    SHSNMallPoiViewController *parentVC = (SHSNMallPoiViewController *)self.parentController;
+//    [parentVC.titleView addTarget:self action:@selector(initRefreshToTop) forControlEvents:UIControlEventTouchUpInside];
+}
+
+- (void)shouldLoadMore {
+    SHSPoiTimeLineTagStatus *status = self.timeLineData[self.selectedTag];
+    __weak typeof(self) weakSelf = self;
+    SHSTimeLineTag *tag = self.selectedTag;
+    NSInteger pageNum = status.currentPage + 1;
+    [self.timeLineService getFreshTimeline:pageNum TagId:tag.tagId TagType: tag.tagType LastId:status.lastId Handler:^(SHSFreshTimeLineResponse *tagFreshTimeline, NSInteger errCode) {
+        [weakSelf handleLoadMore:tag callback:tagFreshTimeline errorCode:errCode];
+    }];
+}
+
+- (void)initRefresh {
+    [self onTimeLineTagSelected: self.timelineTags[0] showHud: NO];
+}
+
+- (void)initRefreshToTop {
+    [self.header onTagNodeSelected:self.header.selectedNode];
+}
+
+- (void)handleLoadMore: (SHSTimeLineTag *)tag callback: (SHSFreshTimeLineResponse *)newFreshTimeline errorCode: (NSInteger)errCode {
+    SHSPoiTimeLineTagStatus *status = self.timeLineData[tag];
+    if (errCode == 0) {
+        self.onlinePersonCount = newFreshTimeline.onlinePerson;
+        [self.tableView.infiniteScrollingView stopAnimating];
+        status.isRefreshing = NO;
+        if (newFreshTimeline.freshCardList.count == 0) {
+            if (self.selectedTag == tag) {
+                [self showHudTextOnly:@"没有更多了" DismissDelay:1.0f];
+                [self tabBarShouldShow:YES];
+            }
+        }else{
+            status.currentPage += 1;
+            NSInteger originCount = status.data.count;
+            [status.data addObjectsFromArray:newFreshTimeline.freshCardList];
+            if (self.selectedTag == tag) {
+                [self insertRows: newFreshTimeline.freshCardList origin: originCount];
+            }
+        }
+        
+        [UTHelper shsCtrlClicked:SHS_UT_TIMELINE_POI_LOADMORE args:[NSDictionary dictionaryWithObjectsAndKeys:self.mallId,@"mallId",self.selectedTag.tagName,@"tagName",[NSString stringWithFormat:@"%lu",(unsigned long)newFreshTimeline.freshCardList.count],@"feedCnt", nil]];
+    }else{
+        // Error
+        if (self.selectedTag == tag) {
+            [self showHudTextOnly:@"加载失败，请稍候重试" DismissDelay:1.0f];
+        }
+    }
+    
+}
+
+- (void)setOnlinePersonCount:(NSInteger)onlinePersonCount {
+    [self.topCell configOnlinePersonCount:onlinePersonCount];
+}
+
+- (void)clearDataAndView {
+ 
+    self.timelineTags = nil;
+    self.timeLineData = nil;
+    self.poiInfo = nil;
+    [self configTopBar:@""];
+    [self.headerView configureData:self.poiInfo count:@"0" userList:nil];
+    [self.tableView reloadData];
+}
+
+
+#pragma mark - Refresh Action
+
+- (void)tableviewLoadmore {
+    if ([self.tableView numberOfRowsInSection:0] < 10) {
+        return;
+    }
+    [self shouldLoadMore];
+}
+
+- (void)tableviewPullRefresh {
+    [self reloadTagData];
+}
+
+- (void)startRefresh: (SHSTimeLineTag *)tag {
+    SHSPoiTimeLineTagStatus *status = self.timeLineData[tag];
+    if (status.isRefreshing) {
+        return;
+    }
+    status.isRefreshing = YES;
+    [self.tableView.infiniteScrollingView stopAnimating];
+}
+
+- (void)removeRefreshRow {
+    @synchronized(timeLineLock) {
+        [self.tableView beginUpdates];
+        [self.tableView deleteRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:0 inSection:0]] withRowAnimation:UITableViewRowAnimationTop];
+        [self.tableView endUpdates];
+    }
+}
+
+# pragma mark - Time Line Action
+
+- (void)onTimeLineTagSelected:(SHSTimeLineTag *)tag {
+    if (self.tableView.contentOffset.y > self.tableViewOffsetWhenTopCellAtBottom) {
+        if ([self.tableView numberOfRowsInSection:0]) {
+            [self.tableView scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0] atScrollPosition:UITableViewScrollPositionTop animated:NO];
+        }
+    }
+    [self onTimeLineTagSelected:tag showHud:YES];
+}
+
+- (void)onRefreshCurrentTimeLine {
+    [self onTimeLineTagSelected:self.selectedTag showHud:YES];
+}
+
+
+- (void)insertRows: (NSArray *)data origin: (NSInteger)originCount{
+    @synchronized(timeLineLock) {
+        NSMutableArray *indexPaths = [NSMutableArray array];
+        for (int i=0;i<data.count;i++) {
+            [indexPaths addObject:[NSIndexPath indexPathForRow:i+originCount inSection:0]];
+        }
+        [self.tableView beginUpdates];
+        [self.tableView insertRowsAtIndexPaths:indexPaths withRowAnimation:UITableViewRowAnimationAutomatic];
+        [self.tableView endUpdates];
+    }
+}
+
+- (void)onTimeLineTagSelected:(SHSTimeLineTag *)tag showHud: (BOOL)showHud {
+    NSInteger pageNum = 1;
+    __weak typeof(self) weakSelf = self;
+    self.lastTag = self.selectedTag;
+    self.selectedTag = tag;
+    [self startRefresh:self.selectedTag];
+    [self reloadSection];
+    SHSPoiTimeLineTagStatus *status = self.timeLineData[tag];
+    [UTHelper shsCtrlClicked:SHS_UT_TIMELINE_POI_TAB_OTHERS args:@{@"mallId": SAFE_STRING(self.mallId), @"tagId": SAFE_STRING(tag.tagId), @"tagName": SAFE_STRING(tag.tagName)}];
+    [self.timeLineService getFreshTimeline:pageNum TagId:tag.tagId TagType:tag.tagType LastId:status.lastId Handler:^(SHSFreshTimeLineResponse *tagFreshTimeline, NSInteger errCode) {
+        [weakSelf handleRefreshTag:tag callback:tagFreshTimeline errorCode:errCode showHud:showHud];
+    }];
+}
+
+- (void)handleRefreshTag: (SHSTimeLineTag *)tag callback: (SHSFreshTimeLineResponse *)newFreshTimeline errorCode: (NSInteger) errCode showHud: (BOOL)showHud{
+    SHSPoiTimeLineTagStatus *status = self.timeLineData[tag];
+    status.currentPage = 1;
+    status.isRefreshing = NO;
+    if (errCode == 0) {
+        self.onlinePersonCount = newFreshTimeline.onlinePerson;
+        status.data = [NSMutableArray arrayWithArray:newFreshTimeline.freshCardList];
+        if (status.data.count > 0) {
+            status.showInfiniteScrolling = status.data.count >= 10;
+        }else{
+        }
+        if (self.selectedTag == tag) {
+            [self reloadSection];
+        }
+    }else{
+        // Error
+        if (showHud && self.selectedTag == tag) {
+            [self removeRefreshRow];
+            [self showHudTextOnly:@"加载失败，请稍候重试" DismissDelay:1.0f];
+        }
+    }
+}
+
+# pragma mark - FreshCardViewCellDelegate
+
+- (void)freshCardSelected:(NSString *)freshId OwnerId:(NSString *)ownerId {
+    [SHSFreshRouterService showFreshDetailViewController:freshId
+                                                 OwnerId:ownerId
+                                               isFromMsg:NO
+                                              forComment:NO
+                                               CommentId:nil
+                                              FromTarget:self
+                                     scrollToCommentArea:NO];
+}
+
+- (void)freshCardComment:(NSString *)freshId OwnerId:(NSString *)ownerId
+{
+    [SHSFreshRouterService showFreshDetailViewController:freshId
+                                                 OwnerId:ownerId
+                                               isFromMsg:NO
+                                              forComment:YES
+                                               CommentId:nil
+                                              FromTarget:self
+                                     scrollToCommentArea:YES];
+}
+
+- (void)freshCardUser:(NSString *)tbUserId {
+    [PersonalRouterService showPersonalPageWithTBId:tbUserId FromTarget:self];
+}
+
+- (void)freshCardStore:(NSString *)freshId StoreId:(NSString *)storeId {
+    SHSOpenUrlFromTargetWithParams(NATIVE_URL_POI_STORE, @{@"storeId":storeId}, self);
+}
+
+# pragma mark DoveFresh
+
+- (void)onDeleteFresh:(NSString *)freshId Error:(NSInteger)errCode ErrMsg:(NSString *)errMsg
+{
+    if (errCode == 0) {
+        if (self.selectedTag && [self.tableView numberOfRowsInSection:0]) {
+            SHSPoiTimeLineTagStatus *status = self.timeLineData[self.selectedTag];
+            for (int i=0; i<status.data.count;i++) {
+                SHSFreshCardModel *model = [status.data objectAtIndex:i];
+                if ([model.cardId isEqualToString:freshId]) {
+                    [status.data removeObject:model];
+                    [self.tableView beginUpdates];
+                    [self.tableView deleteRowsAtIndexPaths:[NSArray arrayWithObject:[NSIndexPath indexPathForRow:i inSection:0]] withRowAnimation:UITableViewRowAnimationNone];
+                    [self.tableView endUpdates];
+                    break;
+                }
+            }
+        }
+    }
+}
+
+# pragma mark - Property Getter
+
+- (NSMutableDictionary *)timeLineData {
+    if (!_timeLineData) {
+        _timeLineData = [NSMutableDictionary dictionary];
+    }
+    return _timeLineData;
+}
+
+- (UIButton *)searchButton {
+    if (!_searchButton) {
+        //搜索框
+        _searchButton = [UIButton buttonWithType:UIButtonTypeCustom];
+        _searchButton.layer.cornerRadius = 4.0;
+        _searchButton.layer.masksToBounds = YES;
+        _searchButton.layer.shouldRasterize = YES;
+        _searchButton.layer.rasterizationScale = SCREEN_SCALE;
+        [_searchButton setBackgroundColor:FMColorWithRGBAlpha0X(0xffffff, 0.3)];
+        [_searchButton setTitle:@"  搜索店铺、品牌" forState:UIControlStateNormal];
+        [_searchButton setImage:[UIImage imageNamed:@"poi_search_small_white"] forState:UIControlStateNormal];
+        [_searchButton setImage:[UIImage imageNamed:@"poi_search_small_white"] forState:UIControlStateHighlighted];
+        [_searchButton setTitleColor:FMColorWithRGBAlpha0X(0xffffff, 0.7) forState:UIControlStateNormal];
+        [_searchButton.titleLabel setFont:[UIFont systemFontOfSize:12.0]];
+        _searchButton.frame = CGRectMake(0.0, 0.0, SCREEN_SIZE.width, 28.0);
+        [_searchButton addTarget:self action:@selector(searchButtonClicked:) forControlEvents:UIControlEventTouchUpInside];
+    }
+    return _searchButton;
+}
+
+- (UIButton *)smallSearchButton {
+    if (!_smallSearchButton) {
+        _smallSearchButton = [UIButton buttonWithType:UIButtonTypeCustom];
+        [_smallSearchButton setFrame:CGRectMake(0, 0, 24, 24)];
+        [_smallSearchButton setContentMode:UIViewContentModeCenter];
+        [_smallSearchButton setImage:[UIImage imageNamed:@"poiNav_search_black"] forState:UIControlStateNormal];
+        [_smallSearchButton addTarget:self action:@selector(searchButtonClicked:) forControlEvents:UIControlEventTouchUpInside];
+    }
+    return _smallSearchButton;
+}
+
+
+- (UILabel *)titleLabel{
+    if (!_titleLabel) {
+        _titleLabel = [[UILabel alloc]initWithFrame:CGRectMake(0, 0, 200, 44)];
+        _titleLabel.textAlignment = NSTextAlignmentCenter;
+    }
+    return _titleLabel;
+}
+
+-(UIControl *)titleView {
+    if (!_titleView) {
+        
+        _titleView = [[UIControl alloc] initWithFrame:CGRectMake(0, 0, 200, 44)];
+        [_titleView addSubview:self.titleLabel];
+        
+        UIImageView *refresh = [[UIImageView alloc] initWithFrame:CGRectMake((200 + 44)/2.0-10, 15, 14, 14)];
+        refresh.image = [UIImage imageNamed:@"fresh_refresh"];
+        refresh.tag = 101;
+        [_titleView addSubview:refresh];
+        
+        refresh.hidden = YES;
+    }
+    return _titleView;
+}
+
+- (UIButton *)menuButton {
+    if (!_menuButton) {
+        NSString *title = @"商场";
+        _menuButton = [UIButton buttonWithType:UIButtonTypeCustom];
+        _menuButton.frame = CGRectMake(0.0, 0.0, 60.0, 44.0);
+        [_menuButton.titleLabel setFont:[UIFont systemFontOfSize:14.0]];
+        [_menuButton addTarget:self action:@selector(menuButtonPressed) forControlEvents:UIControlEventTouchUpInside];
+        [_menuButton setTitle:title forState:UIControlStateNormal];
+        [_menuButton setImage:[UIImage imageNamed:@"poi_menu_white"] forState:UIControlStateNormal];
+        [_menuButton setImage:[UIImage imageNamed:@"poi_menu_white"] forState:UIControlStateHighlighted];
+        [_menuButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        [_menuButton setTitleColor:[UIColor whiteColor] forState:UIControlStateHighlighted];
+        NSDictionary *attrDic = [NSDictionary dictionaryWithObjectsAndKeys:[UIFont systemFontOfSize:14.0],NSFontAttributeName, nil];
+        CGRect rect = [title boundingRectWithSize:CGSizeMake(0.0, MAXFLOAT)
+                                          options:NSStringDrawingTruncatesLastVisibleLine | NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                                       attributes:attrDic
+                                          context:nil];
+        _menuButton.bounds = CGRectMake(0, 0, rect.size.width + 28.0f + 6.0f, 44.0);
+        [_menuButton setImageEdgeInsets:UIEdgeInsetsMake(0, -3, 0, 0)];
+        [_menuButton setTitleEdgeInsets:UIEdgeInsetsMake(0, 3, 0, 0)];
+    }
+    return _menuButton;
+}
+
+- (UIButton *)scanButton
+{
+    if (!_scanButton) {
+        _scanButton = [UIButton buttonWithType:UIButtonTypeCustom];
+        [_scanButton setFrame:CGRectMake(0, 0, 28, 28)];
+        [_scanButton setContentMode:UIViewContentModeCenter];
+        [_scanButton setImage:[UIImage imageNamed:@"poiNav_scan_white"] forState:UIControlStateNormal];
+        [_scanButton addTarget:self action:@selector(scanButtonTaped) forControlEvents:UIControlEventTouchUpInside];
+    }
+    return _scanButton;
+}
+
+#pragma mark private
+
+/**
+ 悬浮按钮
+ */
+- (UIButton *)pubButton
+{
+    if (!_pubButton) {
+        
+        float pubButtonWidth = 55.0f;
+        _pubButton = [[UIButton alloc] initWithFrame:CGRectMake(SCREEN_WIDTH - pubButtonWidth - 20.0f, SCREEN_HEIGHT - pubButtonWidth - 49.0 - 15.0f , pubButtonWidth, pubButtonWidth)];
+        [_pubButton setImage:[UIImage imageNamed:@"xinxianshi_faxinde"] forState:UIControlStateNormal];
+        [_pubButton addTarget:self action:@selector(publishButtonPress:) forControlEvents:(UIControlEventTouchUpInside)];
+    }
+    return _pubButton;
+}
+
+- (void)publishButtonPress:(id)sender
+{
+    [SHSFreshRouterService showFreshPostFromMall:self mallId:self.mallId gdMallId:self.gaoDeMallId];
+}
+
+- (NSInteger)getTimeLineTagIndexByTagId:(NSString *)tagId TagType:(NSInteger)tagType{
+    if (tagId.length == 0) {
+        return NSNotFound;
+    }
+    
+    for (NSInteger i=0; i<self.timelineTags.count; i++) {
+        SHSTimeLineTag *tag = [self.timelineTags objectAtIndex:i];
+        if ([tag.tagId isEqualToString:tagId] && tag.tagType == tagType) {
+            return i;
+        }
+    }
+    
+    return NSNotFound;
+}
+
+//最新tag
+- (NSInteger)getNewestTimeLineTagIndex{
+    NSString *mNewestTagId = [self.header getNewestTagId];
+    if (mNewestTagId.length == 0) {
+        return NSNotFound;
+    }
+    
+    NSInteger mNewestTagType = [self.header getNewestTagType];
+    for (NSInteger i=0; i<self.timelineTags.count; i++) {
+        SHSTimeLineTag *tag = [self.timelineTags objectAtIndex:i];
+        if ([tag.tagId isEqualToString:mNewestTagId] && tag.tagType == mNewestTagType) {
+            return i;
+        }
+    }
+    
+    return NSNotFound;
+}
+
+#pragma mark DoveFreshPublishAPI
+
+- (void)onFreshPublishSuccess:(SHSFreshCardModel *)model
+{
+    if (model) {
+        if ([self.selectedTag.tagId isEqualToString:model.groupIdentifier.tagId] && self.selectedTag.tagType == model.groupIdentifier.tagType) {
+            [self insertFreshCardModel:model ToTimeLineTag:self.selectedTag];
+        }
+        else{
+            NSInteger index = [self getNewestTimeLineTagIndex];
+            if (index == NSNotFound) {
+                index = [self getTimeLineTagIndexByTagId:model.groupIdentifier.tagId TagType:model.groupIdentifier.tagType];
+                if (index == NSNotFound) {
+                    return;
+                }
+            }
+            ASTagNode *node = [self.header getscrollNodeAtIndex:index];
+            if (node) {
+                [self.header onTagNodeSelected:node];
+                [self.header backNewFresh:node];
+                SHSTimeLineTag *tag = [self.timelineTags objectAtIndex:index];
+                [self insertFreshCardModel:model ToTimeLineTag:tag];
+            }
+        }
+    }
+}
+
+-(void)insertFreshCardModel:(SHSFreshCardModel *)model ToTimeLineTag:(SHSTimeLineTag *)timeLineTag{
+    if (model && timeLineTag) {
+        SHSPoiTimeLineTagStatus *status = self.timeLineData[timeLineTag];
+        status.sendStatus = YES;
+        self.selectedTag = timeLineTag;
+        
+        int targetIndex = 0;
+        for (int i = 0; i < status.data.count; i++) {
+            SHSFreshCardModel *dest = status.data[i];
+            if (! dest.top) {
+                targetIndex = i;
+                break;
+            }
+        }
+        
+        [status.data insertObject:model atIndex:targetIndex];
+        [self.tableView beginUpdates];
+        [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:0] withRowAnimation:UITableViewRowAnimationNone];
+        [self.tableView endUpdates];
+        [self.tableView scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:targetIndex inSection:0] atScrollPosition:UITableViewScrollPositionTop animated:NO];
+    }
+}
+
+#pragma mark - Navigation Action
+
+- (void)searchButtonClicked:(UIButton *)button {
+    [self gotoSearchCategoryPage];
+    
+    NSMutableDictionary *args = [[NSMutableDictionary alloc] init];
+    [args safeSetObject:self.mallId forKey:@"mallId"];
+    [UTHelper shsCtrlClicked:SHS_UT_Search args:args];
+}
+
+-(void)gotoSearchCategoryPage{
+    NSDictionary *paraDic = [NSDictionary dictionaryWithObjectsAndKeys:self.mallId.length>0?self.mallId:@"",@"mallId",self.gaoDeMallId.length>0?self.gaoDeMallId:@"",@"gdMallId",SAFE_STRING(self.outMapTableId),@"tableId", nil];
+    
+    SHSOpenUrlFromTargetWithParams(NATIVE_URL_COMMON_SEARCH, paraDic, self);
+}
+
+- (void)scanButtonTaped {
+    [SHSScanService startScan];
+    [UTHelper shsCtrlClicked:SHS_UT_Scan args:[[NSDictionary alloc] initWithObjectsAndKeys:self.mallId, @"mallId", nil]];
+}
+
+- (void)menuButtonPressed {
+    [SHSMallListService showMallListViewControllerFromTarget:self PreferedCity:nil];
+}
+
+ - (void)updateNavigationBarStyle {
+    
+    CGFloat alpha = MAX(MIN(self.tableView.contentOffset.y > 0 ? (self.tableView.contentOffset.y / (self.bannerHeight - 2 * 64)) : 0, 1), 0);
+    CGFloat threhold = 0.6;
+    
+    if (alpha > 0) {
+        [self setNavAlpha:alpha shadowLine:(alpha > threhold)];
+    }else{
+        [self setNavAlpha:0 shadowLine:NO];
+        [self setNavBarFullTransParent:NO];
+    }
+    
+    if (alpha > threhold) {
+        [self restoreStatusBar];
+    }else{
+        [self setStatusBarLight];
+    }
+    
+    [self configTitle: alpha > threhold alpha:alpha];
+    
+    if ((alpha > threhold && (alpha - self.lastAlpha) > 0) || (alpha < threhold && (alpha - self.lastAlpha) < 0)) {
+        [self configureMenuButton:alpha threhold:threhold];
+        UIBarButtonItem *leftButton = [[UIBarButtonItem alloc] initWithCustomView:self.menuButton];
+        UIBarButtonItem *leftSpacer = [[UIBarButtonItem alloc]
+                                       initWithBarButtonSystemItem:UIBarButtonSystemItemFixedSpace
+                                       target:nil action:nil];
+        leftSpacer.width = -5.0;
+        self.navigationItem.leftBarButtonItems = [NSArray arrayWithObjects:leftSpacer, leftButton, nil];
+        UIBarButtonItem *searchItem = [[UIBarButtonItem alloc] initWithCustomView:self.smallSearchButton];
+        NSString *scanImageName = alpha > threhold ? @"poiNav_scan_black" : @"poiNav_scan_white";
+        [self.scanButton setImage:[UIImage imageNamed:scanImageName] forState:UIControlStateNormal];
+        UIBarButtonItem *scanItem = [[UIBarButtonItem alloc] initWithCustomView:self.scanButton];
+        UIBarButtonItem *scanSpacer = [[UIBarButtonItem alloc]
+                                       initWithBarButtonSystemItem:UIBarButtonSystemItemFixedSpace
+                                       target:nil action:nil];
+        scanSpacer.width = 15.0f;
+        NSArray *rigtItems = alpha > threhold ? [NSArray arrayWithObjects:scanItem, scanSpacer, searchItem, nil] : [NSArray arrayWithObjects:scanItem, scanSpacer, nil];
+        self.navigationItem.rightBarButtonItems = rigtItems;
+    }
+     self.lastAlpha = alpha;
+     self.titleLabel.frame = CGRectMake(0, 0, self.navigationItem.titleView.frame.size.width, 44);
+}
+
+- (void)configTopBar: (NSString *)title{
+    self.titleLabel.text = title;
+    [self updateNavigationBarStyle];
+}
+
+- (void)configTitle: (BOOL)showText alpha: (CGFloat)alpha{
+    [UIView animateWithDuration:0.6 animations:^{
+        if (showText) {
+            self.navigationItem.titleView = self.titleView;
+            self.navigationItem.titleView.alpha = alpha;
+        }else {
+            self.navigationItem.titleView = self.searchButton;
+            self.navigationItem.titleView.alpha = 1;
+        }
+    }];
+}
+
+- (void)configureMenuButton:(CGFloat)alpha threhold:(CGFloat)threhold
+{
+    NSString *menuImageName = (alpha > threhold ? @"poi_menu_black" : @"poi_menu_white");
+    [self.menuButton setImage:[UIImage imageNamed:menuImageName] forState:UIControlStateNormal];
+    [self.menuButton setImage:[UIImage imageNamed:menuImageName] forState:UIControlStateHighlighted];
+    UIColor *textColor = (alpha > threhold ? [UIColor blackColor] : [UIColor whiteColor]);
+    [self.menuButton setTitleColor:textColor forState:UIControlStateNormal];
+    [self.menuButton setTitleColor:textColor forState:UIControlStateHighlighted];
+}
+
+- (void)dealloc
+{
+    self.tableView.asyncDelegate = nil;
+    self.tableView.asyncDataSource = nil;
+}
+
+
+@end
